@@ -1,6 +1,5 @@
 #include <esp_now.h>
 #include <WiFi.h>
-#include <ModbusRTU.h>
 #include <Keypad.h>
 #include <EEPROM.h>
 #include <LiquidCrystal.h>
@@ -13,7 +12,7 @@
 #define EEP_TICKET_TYPE 1
 #define EEP_MASTER_CONSOLE 2
 
-#define RS485_DISPLAY_CALL 0xA1
+#define RS485_CALL_INSTR 0xA1
 
 #define RXD2 16
 #define TXD2 17
@@ -22,9 +21,11 @@ HardwareSerial rs485(1);
 #define RS485_WRITE     1
 #define RS485_READ      0
 
+bool RS485_connected = false;
+
 static uint8_t CRC_intex = 0;
 static uint16_t CRC_receive = 0xffff;
-#define CRC_divisor	 0x8005
+#define CRC_divisor	 0xA001
 
 //uint8_t broadcastConsole1[] = { 0x30, 0xC6, 0xF7, 0xEA, 0xE5, 0x44 }; //Master 30:C6:F7:EA:E5:44
 uint8_t broadcastConsole1[] = { 0x94, 0x3C, 0xC6, 0x82, 0x18, 0xA4 };//Slave
@@ -80,7 +81,7 @@ const int rs = 5, en = 27, d4 = 26, d5 = 25, d6 = 33, d7 = 32;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 #define ROW_NUM     4 // four rows
 #define COLUMN_NUM  4 // four columns
-const char Sorft_ID[] PROGMEM = "Console_now_V4.1";
+const char Sorft_ID[] PROGMEM = "Console_now_V5.1";
 const char Company[] PROGMEM = " Rousis Systems ";
 
 char keys[ROW_NUM][COLUMN_NUM] = {
@@ -194,8 +195,7 @@ void setup() {
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
       Serial.println("Failed to add peer 2");
       return;
-  }
-  
+  } 
 
   // Register for a callback function that will be called when data is received
   esp_now_register_recv_cb(OnDataRecv);
@@ -221,10 +221,30 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Address: ");
   lcd.print(address);
-  delay(2000);
-  lcd.clear();
+  delay(2000);  
 
-  update_queue("UPDATE",0);
+#if RS485_ENABLE
+  uint8_t loop_count = 3;
+  while (loop_count && !RS485_connected)
+  {
+      loop_count--;
+      RS485_connected = RS485_display_check(1);
+      delay(100);
+  }
+  if (RS485_connected)
+  {
+      Serial.println("RS485 LED dipsplay 1 Online!");
+      lcd.setCursor(0, 1);
+      lcd.print("RS485 Connected!");
+      delay(2000);
+  }
+  else {
+      Serial.println("False on RS485, dipsplay 1 offline");
+  }
+#endif // RS485_ENABLE
+
+  lcd.clear();
+  update_queue("UPDATE", 0);
 }
 
 void loop() {
@@ -261,8 +281,8 @@ void loop() {
                         //queue++;
                         queue = inc_cueue(queue);
                         update_queue("CALL",address);
-                        lcd.setCursor(0, 1);
-                        lcd.print("CALL            ");
+                        /*lcd.setCursor(0, 1);
+                        lcd.print("CALL            ");*/
                     }
                     else 
                     {
@@ -297,8 +317,8 @@ void loop() {
                     if (master)
                     {
                         recall(address);
-                        lcd.setCursor(0, 1);
-                        lcd.print("RECALL          ");
+                        /*lcd.setCursor(0, 1);
+                        lcd.print("RECALL          ");*/
                     }
                     else 
                     {
@@ -594,26 +614,45 @@ void update_queue(String Instr, uint8_t consol_address) {
     if (Instr == "CALL")
     {    
         recalls[consol_address] = Queue_senting.queue;
-
-        result = esp_now_send(broadcastAddress1, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
         lcd.setCursor(0, 1);
-        if (result == ESP_OK) {
-            Serial.println("Updated dipsplay 1");
+        lcd.print("Sending...      ");
+
+        if (RS485_connected)
+        {
+            uint8_t loop_count = 3;
+            bool sent_success = false;
+            while (loop_count && !sent_success)
+            {
+                loop_count--;
+                sent_success = RS485_display_call(queue_characters, RS485_CALL_INSTR, 1);
+                delay(100);
+            }
+            if (sent_success)
+            {
+                Serial.println("Succesfuly RS485 CALL dipsplay 1");
+                lcd.setCursor(0, 1);
+                lcd.print("CALL OK!        ");
+            }
+            else {
+                Serial.println("False on RS485 CALL dipsplay 1...");
+                lcd.setCursor(0, 1);
+                lcd.print("False RS485...  ");
+            }
         }
         else {
-            Serial.println("Error display 1");
-            lcd.print("Error display 1");
+            result = esp_now_send(broadcastAddress1, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
+            lcd.setCursor(0, 1);
+            if (result == ESP_OK) {
+                Serial.println("Updated dipsplay 1");
+                lcd.setCursor(0, 1);
+                lcd.print("CALL OK!        ");
+            }
+            else {
+                lcd.setCursor(0, 1);
+                Serial.println("Error display 1");
+                lcd.print("Error display 1");
+            }
         }
-
-#if RS485_ENABLE
-        if (RS485_display_call(queue_characters, RS485_DISPLAY_CALL, 1))
-        {
-            Serial.println("Succesfuly RS485 CALL dipsplay 1");
-        } else {
-            Serial.println("Error on RS485 CALL dipsplay 1...");
-        }        
-#endif // RS485_ENABLE
-
 
         //result = esp_now_send(broadcastAddress2, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
         result = esp_now_send(broadcastAddress2, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
@@ -650,7 +689,7 @@ void recall(uint8_t console_address) {
     Queue_senting.counter = console_address;
     Queue_senting.category = "1";
 
-    result = esp_now_send(broadcastAddress1, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
+    /*result = esp_now_send(broadcastAddress1, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
     lcd.setCursor(0, 1);
     if (result == ESP_OK) {
         Serial.println("Updated dipsplay 1");
@@ -658,7 +697,47 @@ void recall(uint8_t console_address) {
     else {
         Serial.println("Error display 1");
         lcd.print("Error display 1");
+    }*/
+    lcd.setCursor(0, 1);
+    lcd.print("Sending...      ");
+
+    if (RS485_connected)
+    {
+        uint8_t loop_count = 3;
+        bool sent_success = false;
+        while (loop_count && !sent_success)
+        {
+            loop_count--;
+            sent_success = RS485_display_call(queue_characters, RS485_CALL_INSTR, 1);
+            delay(100);
+        }
+        if (sent_success)
+        {
+            Serial.println("Succesfuly RS485 CALL dipsplay 1");
+            lcd.setCursor(0, 1);
+            lcd.print("RECALL OK!      ");
+        }
+        else {
+            Serial.println("False on RS485 CALL dipsplay 1...");
+            lcd.setCursor(0, 1);
+            lcd.print("False RS485...  ");
+        }
     }
+    else {
+        result = esp_now_send(broadcastAddress1, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
+        lcd.setCursor(0, 1);
+        if (result == ESP_OK) {
+            Serial.println("Updated dipsplay 1");
+            lcd.setCursor(0, 1);
+            lcd.print("RECALL OK!      ");
+        }
+        else {
+            Serial.println("Error display 1");
+            lcd.setCursor(0, 1);
+            lcd.print("Error display 1");
+        }
+    }
+
     //result = esp_now_send(broadcastAddress2, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
     result = esp_now_send(broadcastAddress2, (uint8_t*)&Queue_senting, sizeof(Queue_senting));
     lcd.setCursor(0, 1);
@@ -700,30 +779,49 @@ bool RS485_display_call(char* buf, uint8_t instr,uint8_t disp_add) {
 
     for (size_t i = 0; i < sizeof(buf); i++)
     {
-        rs485.write(buf[i]);
-        Put_CRC(buf[i]);
+        if (buf[i])
+        {
+            rs485.write(buf[i]);
+            Put_CRC(buf[i]);
+        }
+        
     }
 
     rs485.write(0x4);
     Put_CRC(4);
+    rs485.write(CRC_receive & 0xff);
+    rs485.write((CRC_receive >> 8) & 0xff);
     rs485.flush();
     digitalWrite(RS485_PIN_DIR, RS485_READ);
 
     CRC_receive = 0xffff;
-    char reply_pckt[5] = { 0xAA, 0x55, 'O', 'K', '!' };
-    while (rs485.available() > 0) { get_byte = rs485.read(); }
-    //Serial.println("Start receiving packet...");
+    char reply_pckt[7] = { 0xAA, 0x55, 'O', 'K', '!', 0xEA, 0xEB };
+    char received_pckt[10]{ 0 };
+    uint8_t a = 0;
     unsigned long startedWaiting = millis();
-    while (millis() - startedWaiting <= 100 && rs485.available() < 7) {
-        for (size_t i = 0; i < sizeof(reply_pckt); i++)
+    while (millis() - startedWaiting <= 200 ) {
+        
+        while (rs485.available())
         {
-            get_byte = rs485.read();
-            Put_CRC(reply_pckt[i]);
-            if (reply_pckt[i] != get_byte) { return false; }
+            received_pckt[a++] = rs485.read();
         }
-        uint16_t received_CRC = rs485.read() << 8;
-        received_CRC = received_CRC | rs485.read();
-        if(CRC_receive == received_CRC){ return true; }
+        
+        if (a >= 7)
+        {
+            received_pckt[a] = 0;
+            Serial.println("Received packed:");
+            for (size_t i = 0; i < sizeof(received_pckt); i++)
+            {
+                Serial.print(received_pckt[i], HEX); Serial.print(' ');
+            }
+            Serial.println(); Serial.println("--------------------------------------");
+
+            for (size_t i = 0; i < a; i++)
+            {
+                if (received_pckt[i] != reply_pckt[i]) { return false; }
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -742,24 +840,40 @@ bool RS485_display_check(uint8_t disp_add) {
         rs485.write(header_pckt[i]);
         Put_CRC(header_pckt[i]);
     }
+    rs485.write(CRC_receive & 0xff);
+    rs485.write((CRC_receive >> 8) & 0xff);
     rs485.flush();
     digitalWrite(RS485_PIN_DIR, RS485_READ);
 
     CRC_receive = 0xffff;
-    char reply_pckt[5] = { 0xAA, 0x55, 'O', 'K', '!' };
-    while (rs485.available() > 0) { get_byte = rs485.read(); }
-    //Serial.println("Start receiving packet...");
+    char reply_pckt[7] = { 0xAA, 0x55, 'O', 'K', '!', 0xEA, 0xEB };
+    char received_pckt[10] = { 0 };
+    uint8_t a = 0;
     unsigned long startedWaiting = millis();
-    while (millis() - startedWaiting <= 100 && rs485.available() < 7) {
-        for (size_t i = 0; i < sizeof(reply_pckt); i++)
+    while (millis() - startedWaiting <= 200) {
+        
+        while (rs485.available())
         {
-            get_byte = rs485.read();
-            Put_CRC(reply_pckt[i]);
-            if (reply_pckt[i] != get_byte) { return false; }
+            received_pckt[a++] = rs485.read();
         }
-        uint16_t received_CRC = rs485.read() << 8;
-        received_CRC = received_CRC | rs485.read();
-        if (CRC_receive == received_CRC) { return true; }
+
+        if (a >= 7)
+        {
+            received_pckt[a] = 0;
+            Serial.println("Received packed:");
+            for (size_t i = 0; i < sizeof(received_pckt); i++)
+            {
+                Serial.print(received_pckt[i], HEX); Serial.print(' ');
+            }
+            Serial.println(); Serial.println("--------------------------------------");
+
+            for (size_t i = 0; i < a; i++)
+            {
+                if (received_pckt[i] != reply_pckt[i]) { return false; }
+            }
+            return true;
+        }
+
     }
     return false;
 }
